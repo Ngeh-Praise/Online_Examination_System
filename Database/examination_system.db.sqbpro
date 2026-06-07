@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?><sqlb_project><db path="examination_system.db" readonly="0" foreign_keys="1" case_sensitive_like="0" temp_store="0" wal_autocheckpoint="1000" synchronous="2"/><attached/><window><main_tabs open="structure browser pragmas query" current="0"/></window><tab_structure><column_width id="0" width="300"/><column_width id="1" width="0"/><column_width id="2" width="100"/><column_width id="3" width="1867"/><column_width id="4" width="0"/><expanded_item id="0" parent="1"/><expanded_item id="1" parent="1"/><expanded_item id="2" parent="1"/><expanded_item id="3" parent="1"/></tab_structure><tab_browse><table title="courses" custom_title="0" dock_id="1" table="4,7:maincourses"/><dock_state state="000000ff00000000fd00000001000000020000000000000000fc0100000001fb000000160064006f0063006b00420072006f00770073006500310100000000ffffffff0000011800ffffff000000000000000000000004000000040000000800000008fc00000000"/><default_encoding codec=""/><browse_table_settings/></tab_browse><tab_sql><sql name="SQL 1*">-- 1. CLEANUP (Removes old versions if they exist)
+DROP TABLE IF EXISTS proctologs;
+DROP TABLE IF EXISTS results;
+DROP TABLE IF EXISTS questions;
+DROP TABLE IF EXISTS exams;
+DROP TABLE IF EXISTS courses;
+DROP TABLE IF EXISTS lecturers;
+DROP TABLE IF EXISTS students;
+DROP TABLE IF EXISTS users;
+
+-- 2. CREATE TABLES
+CREATE TABLE users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    role TEXT CHECK(role IN ('Student', 'Lecturer', 'Admin')) NOT NULL,
+    password_hash TEXT NOT NULL
+);
+
+CREATE TABLE students (
+    student_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    matricle_number TEXT UNIQUE NOT NULL,
+    level INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE lecturers (
+    lecturer_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    department TEXT,
+    FOREIGN KEY(user_id) REFERENCES users(user_id)
+);
+
+CREATE TABLE courses (
+    course_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    unit_load INTEGER,
+    lecturer_id INTEGER,
+    FOREIGN KEY(lecturer_id) REFERENCES lecturers(lecturer_id)
+);
+
+CREATE TABLE exams (
+    exam_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    course_id INTEGER,
+    date TEXT,
+    duration INTEGER,
+    ca_weight INTEGER DEFAULT 30,
+    FOREIGN KEY(course_id) REFERENCES courses(course_id)
+);
+
+CREATE TABLE questions (
+    question_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exam_id INTEGER,
+    text TEXT NOT NULL,
+    option_a TEXT NOT NULL,
+    option_b TEXT NOT NULL,
+    option_c TEXT NOT NULL,
+    option_d TEXT NOT NULL,
+    correct_answer TEXT NOT NULL,
+    FOREIGN KEY(exam_id) REFERENCES exams(exam_id)
+);
+
+CREATE TABLE results (
+    result_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER,
+    exam_id INTEGER,
+    exam_score REAL DEFAULT 0,
+    ca_score REAL DEFAULT 0,
+    final_grade TEXT,
+    FOREIGN KEY(student_id) REFERENCES students(student_id),
+    FOREIGN KEY(exam_id) REFERENCES exams(exam_id)
+);
+
+CREATE TABLE proctologs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    student_id INTEGER,
+    violation_type TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    evidence_path TEXT,
+    FOREIGN KEY(student_id) REFERENCES students(student_id)
+);</sql><current_tab id="0"/></tab_sql></sqlb_project>
