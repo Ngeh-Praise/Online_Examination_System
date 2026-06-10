@@ -28,10 +28,10 @@ db.serialize(() => {
     db.run(`DROP TABLE IF EXISTS students`);
     db.run(`DROP TABLE IF EXISTS users`);
 
-    // 2. CREATE TABLES (Aligned directly with your DB Browser project setup)
+    // 2. CREATE TABLES (Perfectly aligned with your server.js logic)
     db.run(`CREATE TABLE users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, -- Added for backend primary mapping compatibility
-        user_id INTEGER UNIQUE,               -- Native primary key tracking
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        user_id INTEGER UNIQUE,               
         name TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
         role TEXT CHECK(role IN ('Student', 'Lecturer', 'Admin')) NOT NULL,
@@ -55,11 +55,11 @@ db.serialize(() => {
 
     db.run(`CREATE TABLE courses (
         course_id INTEGER PRIMARY KEY AUTOINCREMENT,
-        code TEXT UNIQUE NOT NULL,            -- Added explicit code field for tracking UI grids
+        code TEXT UNIQUE NOT NULL,            
         title TEXT NOT NULL,
         unit_load INTEGER,
-        lecturer_id INTEGER,                  -- Aligned targeting lecturer profile identity records
-        FOREIGN KEY(lecturer_id) REFERENCES users(id)
+        lecturer_id INTEGER,                  
+        FOREIGN KEY(lecturer_id) REFERENCES users(user_id)
     )`);
 
     db.run(`CREATE TABLE exams (
@@ -124,7 +124,7 @@ db.serialize(() => {
 
     console.log("🌱 Seeding synchronized user account records...");
 
-    // Seed Master users
+    // Seed Master users (Keeping id and user_id identical for cross-endpoint stability)
     db.run(`INSERT INTO users (id, user_id, name, email, role, password_hash) 
         VALUES (1, 1, 'System Administrator', 'admin@exam.com', 'Admin', 'admin123')`);
 
@@ -152,6 +152,7 @@ db.serialize(() => {
 
     console.log("📚 Seeding course records mapped to active lecturers...");
 
+    // Unified referencing to look up via user_id cleanly
     db.run(`INSERT INTO courses (course_id, code, title, unit_load, lecturer_id)
         VALUES (1, 'CS 411', 'Distributed Systems', 4, 2)`);
 

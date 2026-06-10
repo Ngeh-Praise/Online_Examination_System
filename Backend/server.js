@@ -1,3 +1,6 @@
+// 1. Load the environment variables immediately at line 1
+require('dotenv').config();
+
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
@@ -13,10 +16,9 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '15mb' })); 
 
-// Initialize Google Gen AI with explicit environment variable support
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "YOUR_API_KEY_HERE" });
-
-// ====================================================================
+// 2. Initialize the client (it reads process.env.GEMINI_API_KEY automatically)
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+console.log("✅ Google Gen AI SDK initialized cleanly via Environment layer.");
 // 1. CONFIGURE UNIFIED MULTER STORAGE ENGINE
 // ====================================================================
 const storage = multer.diskStorage({
@@ -198,31 +200,124 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/student/schedule', (req, res) => {
-    const { student_id, exam_id, chosen_date, chosen_time } = req.body;
-    if (!student_id || !exam_id || !chosen_date || !chosen_time) return res.status(400).json({ error: "Incomplete selection slots." });
-    
-    const checkQuery = `SELECT * FROM results WHERE student_id = ? AND exam_id = ?`;
-    db.get(checkQuery, [student_id, exam_id], async (err, existingBooking) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (existingBooking) return res.status(400).json({ error: "Slot already registered." });
+    const incomingId = req.body.student_id || req.body.studentId || req.body.userId;
+    const chosen_date = req.body.chosen_date || req.body.date || req.body.bookingDate;
+    const chosen_time = req.body.chosen_time || req.body.timeSlot || req.body.bookingTime;
+    const incomingCourseTitle = req.body.courseTitle || '';
+
+    let exam_id = req.body.exam_id || req.body.examId;
+
+    // 💡 STEP 1: Safely resolve the true student_id from the database first
+    db.get(`SELECT student_id FROM students WHERE user_id = ? OR student_id = ?`, [incomingId, incomingId], (err, studentRecord) => {
+        if (err) return res.status(500).json({ error: "Student profiling resolution error: " + err.message });
         
-        const combinedTimestamp = `${chosen_date} ${chosen_time}`;
-        
-        // Dynamic wait block wrapper handles compilation checks seamlessly
-        const examCode = await generateAIExamCode(student_id, exam_id, combinedTimestamp);
-        
-        const insertQuery = `INSERT INTO results (student_id, exam_id, exam_code, scheduled_time, exam_score, ca_score) VALUES (?, ?, ?, ?, 0, 0)`;
-        
-        db.run(insertQuery, [student_id, exam_id, examCode, combinedTimestamp], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.status(201).json({ 
-                message: "Exam scheduled!", 
-                bookingDetails: { studentId: student_id, examId: exam_id, examCode, scheduledAt: combinedTimestamp } 
+        if (!studentRecord) {
+            console.error(`❌ Could not locate a student account profile matching ID: ${incomingId}`);
+            return res.status(404).json({ error: "Valid student identity profile context not found." });
+        }
+
+        const trueStudentId = studentRecord.student_id;
+
+        // Internal helper to perform the secure database write
+        const executeBooking = (targetExamId) => {
+            const checkQuery = `SELECT * FROM results WHERE student_id = ? AND exam_id = ?`;
+            db.get(checkQuery, [trueStudentId, targetExamId], async (err, existingBooking) => {
+                if (err) return res.status(500).json({ error: err.message });
+                if (existingBooking) return res.status(400).json({ error: "You have already registered for this exam slot." });
+                
+                const combinedTimestamp = `${chosen_date} ${chosen_time}`;
+                const examCode = await generateAIExamCode(trueStudentId, targetExamId, combinedTimestamp);
+                
+                const insertQuery = `INSERT INTO results (student_id, exam_id, exam_code, scheduled_time, exam_score, ca_score) VALUES (?, ?, ?, ?, 0, 0)`;
+                
+                db.run(insertQuery, [trueStudentId, targetExamId, examCode, combinedTimestamp], function(err) {
+                    if (err) return res.status(500).json({ error: err.message });
+                    
+                    res.status(201).json({ 
+                        message: "Exam scheduled successfully!", 
+                        bookingDetails: { 
+                            studentId: trueStudentId, 
+                            examId: targetExamId, 
+                            examCode, 
+                            scheduledAt: combinedTimestamp 
+                        } 
+                    });
+                });
             });
-        });
+        };
+
+        // STEP 2: Resolve the Exam ID from the text title if necessary
+        if (!exam_id && incomingCourseTitle) {
+            const cleanTitleMatch = incomingCourseTitle.split('(')[0].trim();
+            const lookupQuery = `
+                SELECT e.exam_id 
+                FROM exams e
+                JOIN courses c ON e.course_id = c.course_id
+                WHERE c.title LIKE ? OR ? LIKE '%' || c.title || '%'
+                LIMIT 1
+            `;
+
+            db.get(lookupQuery, [cleanTitleMatch, incomingCourseTitle], (err, row) => {
+                if (err) return res.status(500).json({ error: "Failed to map course title: " + err.message });
+                if (!row) return res.status(404).json({ error: `No exam configuration found for: "${incomingCourseTitle}"` });
+                
+                executeBooking(row.exam_id);
+            });
+        } else if (exam_id) {
+            executeBooking(exam_id);
+        } else {
+            return res.status(400).json({ error: "Incomplete selection slots. Missing exam identifier reference." });
+        }
     });
 });
 
+app.get('/api/student/upcoming-exams', (req, res) => {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing user context identifier query parameter." });
+
+    // Safely verify if student table reference checks pass cleanly
+    db.get(`SELECT student_id FROM students WHERE user_id = ?`, [userId], (err, student) => {
+        if (err) {
+            console.error("❌ Error during initial student lookup phase:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        
+        if (!student) {
+            console.warn(`🔍 Trace warning: No student profile record maps to user account ID ${userId}`);
+            return res.json([]); // Return an empty dataset gracefully without throwing a 500 error
+        }
+
+        const query = `
+            SELECT r.result_id as booking_id, r.exam_code, r.scheduled_time, c.title as course_title
+            FROM results r
+            JOIN exams e ON r.exam_id = e.exam_id
+            JOIN courses c ON e.course_id = c.course_id
+            WHERE r.student_id = ?
+            ORDER BY r.scheduled_time ASC
+        `;
+
+        db.all(query, [student.student_id], (err, rows) => {
+            if (err) {
+                // 💡 This console log reveals the exact query bottleneck in your terminal console!
+                console.error("❌ SQLite relational join compilation exception:", err.message);
+                return res.status(500).json({ error: "Database operational join compilation failure: " + err.message });
+            }
+            
+            const formattedRows = (rows || []).map(row => {
+                const timeString = row.scheduled_time || '';
+                const parts = timeString.split(' ');
+                return {
+                    id: row.booking_id,
+                    title: row.course_title,
+                    date: parts[0] || '',
+                    time: parts[1] ? timeString.substring(parts[0].length).trim() : '',
+                    exam_code: row.exam_code
+                };
+            });
+            res.json(formattedRows);
+        });
+    });
+});
 // ====================================================================
 // 5. SECURITY ENVIRONMENT CHECKS AND VERIFICATIONS
 // ====================================================================
@@ -377,7 +472,7 @@ app.post('/api/exams/submit', (req, res) => {
 });
 
 app.post('/api/exams/sync-offline-progress', (req, res) => {
-    const { result_id, student_id, final_score, cached_proctor_violations } = req.body;
+    const { result_id, student_id, final_score, cached_proctor_violations = [] } = req.body;
     if (!result_id || !student_id) return res.status(400).json({ error: "Sync headers missing." });
 
     db.serialize(() => {
@@ -634,5 +729,6 @@ app.post('/api/exams/ai-proctor-check', async (req, res) => {
     }
 });
 
-const PORT = 5000;
+// Dynamically reads the port parameter from your environment variables fallback matrix smoothly
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`🚀 Node.js Core Examination Engine running smoothly on port ${PORT}`); });
