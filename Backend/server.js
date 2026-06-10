@@ -1,3 +1,6 @@
+// 1. Load the environment variables immediately at line 1
+require('dotenv').config();
+
 const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
@@ -7,16 +10,20 @@ const multer = require('multer');
 const pdfParse = require('pdf-parse');
 const mammoth = require('mammoth');
 
+const { GoogleGenAI } = require("@google/genai");
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '15mb' })); 
 
-// ====================================================================
+// 2. Initialize the client (it reads process.env.GEMINI_API_KEY automatically)
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+console.log("✅ Google Gen AI SDK initialized cleanly via Environment layer.");
 // 1. CONFIGURE UNIFIED MULTER STORAGE ENGINE
 // ====================================================================
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        const uploadDir = path.resolve(__dirname, 'uploads');
+        const uploadDir = path.join(__dirname, 'uploads');
         if (!fs.existsSync(uploadDir)) {
             fs.mkdirSync(uploadDir, { recursive: true });
         }
@@ -29,16 +36,17 @@ const storage = multer.diskStorage({
 const upload = multer({ storage: storage });
 
 // Ensure correct system application upload folders exist
-const uploadDir = path.resolve(__dirname, 'uploads/baselines');
-const evidenceDir = path.resolve(__dirname, 'uploads/proctor_evidence');
-[uploadDir, evidenceDir, path.resolve(__dirname, 'uploads')].forEach(dir => {
+const uploadDir = path.join(__dirname, 'uploads', 'baselines');
+const evidenceDir = path.join(__dirname, 'uploads', 'proctor_evidence');
+
+[uploadDir, evidenceDir, path.join(__dirname, 'uploads')].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 // ====================================================================
 // 2. DATABASE INITIALIZATION AND LAYERING
 // ====================================================================
-const dbPath = path.resolve(__dirname, '../database/examination_system.db');
+const dbPath = path.join(__dirname, '..', 'database', 'examination_system.db');
 const db = new sqlite3.Database(dbPath, (err) => {
     if (err) {
         console.error("❌ Database connection error:", err.message);
@@ -84,11 +92,28 @@ const db = new sqlite3.Database(dbPath, (err) => {
 // ====================================================================
 // 3. UTILITY CORE HELPERS
 // ====================================================================
-function generateExamCode() {
+async function generateAIExamCode(studentId, examId, dateTimeString) {
+    try {
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: `You are a secure examination system token layer. Generate a single unique, uppercase alphanumeric passcode for Student ID ${studentId} registering for Assessment ID ${examId} at ${dateTimeString}. Output ONLY the raw alphanumeric characters between 6 to 8 characters long with no additional words, spaces, or sentences.`
+        });
+
+        if (response && response.text) {
+            const code = response.text.trim().replace(/[^A-Z0-9]/g, '');
+            return `EX-${code}`;
+        }
+    } catch (error) {
+        console.error("⚠️ AI token error, using high-entropy fallback routine:", error.message);
+    }
+    
+    // Clean fallback routine if API key isn't set or network drops
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-    let code = 'EX-';
-    for (let i = 0; i < 4; i++) { code += chars.charAt(Math.floor(Math.random() * chars.length)); }
-    return code;
+    let fallback = 'EX-';
+    for (let i = 0; i < 5; i++) { 
+        fallback += chars.charAt(Math.floor(Math.random() * chars.length)); 
+    }
+    return fallback;
 }
 
 function parseAndInsertQuestions(db, examId, rawText, res, tempFilePath) {
@@ -131,7 +156,7 @@ function parseAndInsertQuestions(db, examId, rawText, res, tempFilePath) {
 }
 
 // ====================================================================
-// 4. AUTHENTICATION AND SCHEDULING DISCOVERY ROUTE (UPDATED)
+// 4. AUTHENTICATION AND SCHEDULING DISCOVERY ROUTE
 // ====================================================================
 app.post('/api/auth/login', (req, res) => {
     const { identity, password, role } = req.body; 
@@ -143,13 +168,16 @@ app.post('/api/auth/login', (req, res) => {
             if (err) return res.status(500).json({ error: err.message });
             if (!student) return res.status(444).json({ error: "Matricle number not found." });
             
-            // If students table points to user_id, map it cleanly
             const userQuery = `SELECT * FROM users WHERE id = ? AND role = 'Student'`;
             db.get(userQuery, [student.user_id || student.id], (err, user) => {
                 if (err) return res.status(500).json({ error: err.message });
                 if (!user || user.password_hash !== password) return res.status(401).json({ error: "Invalid credentials." });
                 
-                res.json({ message: "Login successful", role: "Student", user: { id: user.id, studentId: student.student_id, name: user.name, matricleNumber: student.matricle_number } });
+                res.json({ 
+                    message: "Login successful", 
+                    role: "Student", 
+                    user: { id: user.id, studentId: student.student_id, name: user.name, matricleNumber: student.matricle_number } 
+                });
             });
         });
     } else {
@@ -158,12 +186,11 @@ app.post('/api/auth/login', (req, res) => {
             if (err) return res.status(500).json({ error: err.message });
             if (!user || user.password_hash !== password) return res.status(401).json({ error: "Invalid credentials." });
             
-            // CHANGED HERE: Return user.id instead of user.user_id
             res.json({ 
                 message: "Login successful", 
                 role: user.role, 
                 user: { 
-                    id: user.id, // <--- Unified target primary key
+                    id: user.id, 
                     name: user.name, 
                     email: user.email 
                 } 
@@ -171,26 +198,126 @@ app.post('/api/auth/login', (req, res) => {
         });
     }
 });
+
 app.post('/api/student/schedule', (req, res) => {
-    const { student_id, exam_id, chosen_date, chosen_time } = req.body;
-    if (!student_id || !exam_id || !chosen_date || !chosen_time) return res.status(400).json({ error: "Incomplete selection slots." });
-    
-    const checkQuery = `SELECT * FROM results WHERE student_id = ? AND exam_id = ?`;
-    db.get(checkQuery, [student_id, exam_id], (err, existingBooking) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (existingBooking) return res.status(400).json({ error: "Slot already registered." });
+    const incomingId = req.body.student_id || req.body.studentId || req.body.userId;
+    const chosen_date = req.body.chosen_date || req.body.date || req.body.bookingDate;
+    const chosen_time = req.body.chosen_time || req.body.timeSlot || req.body.bookingTime;
+    const incomingCourseTitle = req.body.courseTitle || '';
+
+    let exam_id = req.body.exam_id || req.body.examId;
+
+    // 💡 STEP 1: Safely resolve the true student_id from the database first
+    db.get(`SELECT student_id FROM students WHERE user_id = ? OR student_id = ?`, [incomingId, incomingId], (err, studentRecord) => {
+        if (err) return res.status(500).json({ error: "Student profiling resolution error: " + err.message });
         
-        const examCode = generateExamCode();
-        const combinedTimestamp = `${chosen_date} ${chosen_time}`;
-        const insertQuery = `INSERT INTO results (student_id, exam_id, exam_code, scheduled_time, exam_score, ca_score) VALUES (?, ?, ?, ?, 0, 0)`;
-        
-        db.run(insertQuery, [student_id, exam_id, examCode, combinedTimestamp], function(err) {
-            if (err) return res.status(500).json({ error: err.message });
-            res.status(201).json({ message: "Exam scheduled!", bookingDetails: { studentId: student_id, examId: exam_id, examCode, scheduledAt: combinedTimestamp } });
-        });
+        if (!studentRecord) {
+            console.error(`❌ Could not locate a student account profile matching ID: ${incomingId}`);
+            return res.status(404).json({ error: "Valid student identity profile context not found." });
+        }
+
+        const trueStudentId = studentRecord.student_id;
+
+        // Internal helper to perform the secure database write
+        const executeBooking = (targetExamId) => {
+            const checkQuery = `SELECT * FROM results WHERE student_id = ? AND exam_id = ?`;
+            db.get(checkQuery, [trueStudentId, targetExamId], async (err, existingBooking) => {
+                if (err) return res.status(500).json({ error: err.message });
+                if (existingBooking) return res.status(400).json({ error: "You have already registered for this exam slot." });
+                
+                const combinedTimestamp = `${chosen_date} ${chosen_time}`;
+                const examCode = await generateAIExamCode(trueStudentId, targetExamId, combinedTimestamp);
+                
+                const insertQuery = `INSERT INTO results (student_id, exam_id, exam_code, scheduled_time, exam_score, ca_score) VALUES (?, ?, ?, ?, 0, 0)`;
+                
+                db.run(insertQuery, [trueStudentId, targetExamId, examCode, combinedTimestamp], function(err) {
+                    if (err) return res.status(500).json({ error: err.message });
+                    
+                    res.status(201).json({ 
+                        message: "Exam scheduled successfully!", 
+                        bookingDetails: { 
+                            studentId: trueStudentId, 
+                            examId: targetExamId, 
+                            examCode, 
+                            scheduledAt: combinedTimestamp 
+                        } 
+                    });
+                });
+            });
+        };
+
+        // STEP 2: Resolve the Exam ID from the text title if necessary
+        if (!exam_id && incomingCourseTitle) {
+            const cleanTitleMatch = incomingCourseTitle.split('(')[0].trim();
+            const lookupQuery = `
+                SELECT e.exam_id 
+                FROM exams e
+                JOIN courses c ON e.course_id = c.course_id
+                WHERE c.title LIKE ? OR ? LIKE '%' || c.title || '%'
+                LIMIT 1
+            `;
+
+            db.get(lookupQuery, [cleanTitleMatch, incomingCourseTitle], (err, row) => {
+                if (err) return res.status(500).json({ error: "Failed to map course title: " + err.message });
+                if (!row) return res.status(404).json({ error: `No exam configuration found for: "${incomingCourseTitle}"` });
+                
+                executeBooking(row.exam_id);
+            });
+        } else if (exam_id) {
+            executeBooking(exam_id);
+        } else {
+            return res.status(400).json({ error: "Incomplete selection slots. Missing exam identifier reference." });
+        }
     });
 });
 
+app.get('/api/student/upcoming-exams', (req, res) => {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing user context identifier query parameter." });
+
+    // Safely verify if student table reference checks pass cleanly
+    db.get(`SELECT student_id FROM students WHERE user_id = ?`, [userId], (err, student) => {
+        if (err) {
+            console.error("❌ Error during initial student lookup phase:", err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        
+        if (!student) {
+            console.warn(`🔍 Trace warning: No student profile record maps to user account ID ${userId}`);
+            return res.json([]); // Return an empty dataset gracefully without throwing a 500 error
+        }
+
+        const query = `
+            SELECT r.result_id as booking_id, r.exam_code, r.scheduled_time, c.title as course_title
+            FROM results r
+            JOIN exams e ON r.exam_id = e.exam_id
+            JOIN courses c ON e.course_id = c.course_id
+            WHERE r.student_id = ?
+            ORDER BY r.scheduled_time ASC
+        `;
+
+        db.all(query, [student.student_id], (err, rows) => {
+            if (err) {
+                // 💡 This console log reveals the exact query bottleneck in your terminal console!
+                console.error("❌ SQLite relational join compilation exception:", err.message);
+                return res.status(500).json({ error: "Database operational join compilation failure: " + err.message });
+            }
+            
+            const formattedRows = (rows || []).map(row => {
+                const timeString = row.scheduled_time || '';
+                const parts = timeString.split(' ');
+                return {
+                    id: row.booking_id,
+                    title: row.course_title,
+                    date: parts[0] || '',
+                    time: parts[1] ? timeString.substring(parts[0].length).trim() : '',
+                    exam_code: row.exam_code
+                };
+            });
+            res.json(formattedRows);
+        });
+    });
+});
 // ====================================================================
 // 5. SECURITY ENVIRONMENT CHECKS AND VERIFICATIONS
 // ====================================================================
@@ -345,7 +472,7 @@ app.post('/api/exams/submit', (req, res) => {
 });
 
 app.post('/api/exams/sync-offline-progress', (req, res) => {
-    const { result_id, student_id, final_score, cached_proctor_violations } = req.body;
+    const { result_id, student_id, final_score, cached_proctor_violations = [] } = req.body;
     if (!result_id || !student_id) return res.status(400).json({ error: "Sync headers missing." });
 
     db.serialize(() => {
@@ -377,13 +504,12 @@ app.post('/api/exams/sync-offline-progress', (req, res) => {
 });
 
 // ====================================================================
-// 7. LECTURER PANELS AND BULK DOCUMENT EXTRACTION (UPDATED DYNAMIC ROUTING)
+// 7. LECTURER PANELS AND BULK DOCUMENT EXTRACTION
 // ====================================================================
 app.get('/api/lecturer/overview-stats', (req, res) => {
     const lecturerId = req.query.id;
     if (!lecturerId) return res.status(400).json({ error: "Missing Lecturer ID context parameter." });
 
-    // 1. Get count of active testing configurations assigned to this lecturer
     const activeStudentsQuery = `
         SELECT COUNT(r.result_id) AS activeCount 
         FROM results r
@@ -392,7 +518,6 @@ app.get('/api/lecturer/overview-stats', (req, res) => {
         WHERE c.lecturer_id = ? AND r.verification_status = 'Passed' AND r.exam_score = 0
     `;
 
-    // 2. Get true count of existing courses linked to this lecturer id
     const pendingExamsQuery = `SELECT COUNT(*) AS pendingCount FROM courses WHERE lecturer_id = ?`; 
 
     db.get(activeStudentsQuery, [lecturerId], (err, activeRow) => {
@@ -403,7 +528,7 @@ app.get('/api/lecturer/overview-stats', (req, res) => {
 
             res.json({
                 activeStudents: activeRow?.activeCount || 0,
-                overallGrading: 75, // Static system constant baseline target metric
+                overallGrading: 75, 
                 pendingExams: pendingRow?.pendingCount || 0
             });
         });
@@ -414,7 +539,6 @@ app.get('/api/lecturer/courses', (req, res) => {
     const lecturerId = req.query.id;
     if (!lecturerId) return res.status(400).json({ error: "Missing Lecturer ID context parameter." });
 
-    // SAFE FIX: Only select existing columns from your SQLite schema (course_id, title, code)
     const sql = `
         SELECT course_id, title, code 
         FROM courses 
@@ -427,21 +551,19 @@ app.get('/api/lecturer/courses', (req, res) => {
             return res.status(500).json({ error: err.message });
         }
 
-        // Map database result definitions safely to UI data models with default metrics
         const trackingGrid = (rows || []).map((course) => ({
             id: course.course_id,
             code: course.code || `CS-${course.course_id}`,
             name: course.title || "Unnamed Course Module",
-            enrolled: 0,              // Safe default UI metric 
-            progress: 0,              // Safe default UI metric
-            status: 'Active'          // Safe default state status
+            enrolled: 0,              
+            progress: 0,              
+            status: 'Active'          
         }));
         
         res.json(trackingGrid);
     });
 });
 
-// Route A: Process Bulk Document File Blueprint Parse Loops 
 app.post('/api/lecturer/bulk-upload', upload.single('document'), async (req, res) => {
     try {
         const { course_id } = req.body;
@@ -489,7 +611,6 @@ app.post('/api/lecturer/bulk-upload', upload.single('document'), async (req, res
     }
 });
 
-// Route B: Direct SQL Continuous Assessment Override Sheet Sync
 app.post('/api/lecturer/update-ca', (req, res) => {
     const { matricule, course_id, ca_score } = req.body;
 
@@ -561,5 +682,53 @@ app.post('/api/lecturer/update-ca', (req, res) => {
     );
 });
 
-const PORT = 5000;
+// ====================================================================
+// 5.5 LIVE MULTIMODAL AI PROCTORING RUNNER
+// ====================================================================
+app.post('/api/exams/ai-proctor-check', async (req, res) => {
+    const { image_base64, student_id, result_id } = req.body;
+    
+    if (!image_base64) return res.status(400).json({ error: "No video frame snapshot provided." });
+
+    try {
+        const cleanBase64 = image_base64.replace(/^data:image\/\w+;base64,/, "");
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [
+                "Analyze this proctoring monitoring webcam frame from an ongoing examination. Count the number of human faces visible. Check for any rule infractions (like another person in the room, looking away repeatedly, or holding up a mobile phone). Respond strictly with a JSON object in this format: { \"faces_detected\": number, \"status\": \"Passed\" or \"Flagged\", \"reason\": \"clear brief explanation of what you see\" }",
+                {
+                    inlineData: {
+                        data: cleanBase64,
+                        mimeType: "image/jpeg"
+                    }
+                }
+            ]
+        });
+        
+        if (response && response.text) {
+            const cleanJsonString = response.text.replace(/```json|```/g, "").trim();
+            const analysis = JSON.parse(cleanJsonString);
+
+            if (analysis.status === 'Flagged') {
+                const timestamp = new Date().toISOString();
+                db.run(
+                    `INSERT INTO proctologs (student_id, violation_type, timestamp, evidence_path) VALUES (?, ?, ?, ?)`,
+                    [student_id, analysis.reason, timestamp, `DB_SNAPSHOT_REF_${result_id}`]
+                );
+            }
+
+            return res.json({ success: true, evaluation: analysis });
+        }
+        
+        throw new Error("Empty processing stream from generative engine.");
+
+    } catch (error) {
+        console.error("❌ AI Proctoring interface failure:", error);
+        res.status(500).json({ error: "Failed to evaluate proctoring matrix frame." });
+    }
+});
+
+// Dynamically reads the port parameter from your environment variables fallback matrix smoothly
+const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => { console.log(`🚀 Node.js Core Examination Engine running smoothly on port ${PORT}`); });
